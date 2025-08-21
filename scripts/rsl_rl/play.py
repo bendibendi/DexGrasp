@@ -22,7 +22,7 @@ parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
 parser.add_argument("--num_envs", type=int, default=100, help="Number of environments to simulate.")
-parser.add_argument("--task", type=str, default='Isaac-Lift-Cube-Franka-v0', help="Name of the task.")
+parser.add_argument("--task", type=str, default='DexGrasp-v0', help="Name of the task.")
 parser.add_argument(
     "--use_pretrained_checkpoint",
     action="store_true",

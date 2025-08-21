@@ -19,10 +19,16 @@ from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.markers.config import FRAME_MARKER_CFG
 from .franka import FRANKA_PANDA_CFG
+from . import DEX_DIR
 from . import mdp
+
+
+import os
+import random
 
 @configclass
 class ObjectTableSceneCfg(InteractiveSceneCfg):
+    replicate_physics = False
     robot: ArticulationCfg = FRANKA_PANDA_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
     ee_frame: FrameTransformerCfg = MISSING
     object: RigidObjectCfg | DeformableObjectCfg = MISSING
@@ -43,6 +49,7 @@ class ObjectTableSceneCfg(InteractiveSceneCfg):
 
 @configclass
 class CommandsCfg:
+    #给出一个目标位置
     object_pose = mdp.UniformPoseCommandCfg(
         asset_name="robot",
         body_name=MISSING,  # will be set by agent env cfg
@@ -55,9 +62,7 @@ class CommandsCfg:
 
 @configclass
 class ActionsCfg:
-    # pos: mdp.JointPositionActionCfg = mdp.JointPositionActionCfg(
-    #     asset_name="robot", joint_names=[".*"], scale=0.5, use_default_offset=True
-    # )
+    # pos: mdp.JointPositionActionCfg = mdp.JointPositionActionCfg(asset_name="robot", joint_names=[".*"], scale=0.5, use_default_offset=True)
     pos: mdp.EMAJointPositionToLimitsActionCfg = mdp.EMAJointPositionToLimitsActionCfg(
         asset_name="robot",
         joint_names=[".*"],
@@ -68,15 +73,13 @@ class ActionsCfg:
 
 @configclass
 class ObservationsCfg:
-    """Observation specifications for the MDP."""
-
     @configclass
     class PolicyCfg(ObsGroup):
-        """Observations for policy group."""
-
         joint_pos = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel = ObsTerm(func=mdp.joint_vel_rel)
+        # 物体在机器人坐标系下的位置
         object_position = ObsTerm(func=mdp.object_position_in_robot_root_frame)
+        # --------------------------------------------------------------------------------
         target_object_position = ObsTerm(func=mdp.generated_commands, params={"command_name": "object_pose"})
         actions = ObsTerm(func=mdp.last_action)
         def __post_init__(self):
@@ -89,15 +92,16 @@ class ObservationsCfg:
 
 @configclass
 class EventCfg:
-    """Configuration for events."""
 
     reset_all = EventTerm(func=mdp.reset_scene_to_default, mode="reset")
 
+
+    #重置物体信息，每次重置时可以考虑重置不同的物体
     reset_object_position = EventTerm(
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            "pose_range": {"x": (-0.1, 0.1), "y": (-0.25, 0.25), "z": (0.0, 0.0)},
+            "pose_range": {"x": (-0.1, 0.1), "y": (-0.25, 0.25), "z": (0.0, 0.0), "yaw": (-3.14, 3.14), "roll": (-3.14, 3.14), "pitch": (-3.14, 3.14)},
             "velocity_range": {},
             "asset_cfg": SceneEntityCfg("object", body_names="Object"),
         },
@@ -109,11 +113,6 @@ class RewardsCfg:
     reaching_object = RewTerm(func=mdp.object_ee_distance, params={"std": 0.1}, weight=1.0)
     lifting_object = RewTerm(func=mdp.object_is_lifted, params={"minimal_height": 0.04}, weight=15.0)
     object_goal_tracking = RewTerm(
-        func=mdp.object_goal_distance,
-        params={"std": 0.3, "minimal_height": 0.04, "command_name": "object_pose"},
-        weight=16.0,
-    )
-    object_goal_tracking_fine_grained = RewTerm(
         func=mdp.object_goal_distance,
         params={"std": 0.05, "minimal_height": 0.04, "command_name": "object_pose"},
         weight=5.0,
@@ -128,19 +127,15 @@ class RewardsCfg:
 
 @configclass
 class TerminationsCfg:
-    """Termination terms for the MDP."""
-
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
 
     object_dropping = DoneTerm(
-        func=mdp.root_height_below_minimum, params={"minimum_height": -0.05, "asset_cfg": SceneEntityCfg("object")}
+        func=mdp.root_height_below_minimum, params={"minimum_height": -0.1, "asset_cfg": SceneEntityCfg("object")}
     )
 
 
 @configclass
 class CurriculumCfg:
-    """Curriculum terms for the MDP."""
-
     action_rate = CurrTerm(
         func=mdp.modify_reward_weight, params={"term_name": "action_rate", "weight": -1e-1, "num_steps": 10000}
     )
@@ -164,7 +159,7 @@ class DexGraspEnvCfg(ManagerBasedRLEnvCfg):
         super().__post_init__()
 
         self.decimation = 2
-        self.episode_length_s = 5.0
+        self.episode_length_s = 4.0
         self.sim.dt = 0.01
         self.sim.render_interval = self.decimation
         self.sim.physx.bounce_threshold_velocity = 0.2
@@ -173,12 +168,51 @@ class DexGraspEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_total_aggregate_pairs_capacity = 16 * 1024
         self.sim.physx.friction_correlation_distance = 0.00625
         self.commands.object_pose.body_name = "palm_link"
+
+
+        # self.scene.object = RigidObjectCfg(
+        #     prim_path="{ENV_REGEX_NS}/Object",
+        #     init_state=RigidObjectCfg.InitialStateCfg(pos=[0.5, 0, 0.055], rot=[1, 0, 0, 0]),
+        #     spawn=UsdFileCfg(
+        #         usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
+        #         scale=(0.8, 0.8, 0.8),
+        #         rigid_props=RigidBodyPropertiesCfg(
+        #             solver_position_iteration_count=16,
+        #             solver_velocity_iteration_count=1,
+        #             max_angular_velocity=1000.0,
+        #             max_linear_velocity=1000.0,
+        #             max_depenetration_velocity=5.0,
+        #             disable_gravity=False,
+        #         ),
+        #     ),
+        # )
+
         self.scene.object = RigidObjectCfg(
             prim_path="{ENV_REGEX_NS}/Object",
-            init_state=RigidObjectCfg.InitialStateCfg(pos=[0.5, 0, 0.055], rot=[1, 0, 0, 0]),
-            spawn=UsdFileCfg(
-                usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
-                scale=(0.8, 0.8, 0.8),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=[0.5, 0, 0.01], rot=[1, 0, 0, 0]),
+            spawn=sim_utils.MultiUsdFileCfg(
+                usd_path=[
+                    f"{DEX_DIR}/assets/objects/1.usd",
+                    f"{DEX_DIR}/assets/objects/2.usd",
+                    f"{DEX_DIR}/assets/objects/3.usd",
+                    f"{DEX_DIR}/assets/objects/4.usd",
+                    f"{DEX_DIR}/assets/objects/5.usd",
+                    f"{DEX_DIR}/assets/objects/6.usd",
+                    f"{DEX_DIR}/assets/objects/7.usd",
+                    f"{DEX_DIR}/assets/objects/8.usd",
+                    f"{DEX_DIR}/assets/objects/9.usd",
+                    f"{DEX_DIR}/assets/objects/10.usd",
+                    f"{DEX_DIR}/assets/objects/11.usd",
+                    f"{DEX_DIR}/assets/objects/12.usd",
+                    f"{DEX_DIR}/assets/objects/13.usd",
+                    f"{DEX_DIR}/assets/objects/14.usd",
+                    f"{DEX_DIR}/assets/objects/15.usd",
+                    f"{DEX_DIR}/assets/objects/16.usd",
+                    f"{DEX_DIR}/assets/objects/17.usd",
+                    f"{DEX_DIR}/assets/objects/18.usd",
+                ],
+                random_choice=True,
+                # scale=(1, 1, 1),
                 rigid_props=RigidBodyPropertiesCfg(
                     solver_position_iteration_count=16,
                     solver_velocity_iteration_count=1,
@@ -196,7 +230,7 @@ class DexGraspEnvCfg(ManagerBasedRLEnvCfg):
         marker_cfg.prim_path = "/Visuals/FrameTransformer"
         self.scene.ee_frame = FrameTransformerCfg(
             prim_path="{ENV_REGEX_NS}/Robot/panda_link0",
-            debug_vis=False,
+            debug_vis=True,
             visualizer_cfg=marker_cfg,
             target_frames=[
                 FrameTransformerCfg.FrameCfg(
